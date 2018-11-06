@@ -7,6 +7,8 @@
     2018 Roman
 */
 
+// gssdp-discover -i wlo1 --timeout=3
+
 #include<SPI.h>
 
 //--------------------------------------------------------------------
@@ -24,18 +26,100 @@
 //--------------------------------------------------------------------
 //  FSK/DATA/FSEL:
 //--------------------------------------------------------------------
-#define    DATA                  9
+#define    DATA                  8
 #define    BytesNumber           6
 #define    PERIOD                170
 #define    P_ERROR               30
-#define    FP_MIN                PERIOD - P_ERROR
-#define    FP_MAX                PERIOD + P_ERROR
-#define    SP_MIN                2 * PERIOD - P_ERROR
-#define    SP_MAX                2 * PERIOD + P_ERROR
+#define    FP_MIN                (PERIOD - P_ERROR)
+#define    FP_MAX                (PERIOD + P_ERROR)
+#define    SP_MIN                (2 * PERIOD - P_ERROR)
+#define    SP_MAX                (2 * PERIOD + P_ERROR)
 //--------------------------------------------------------------------
 //  Default data:
 //--------------------------------------------------------------------
 byte DataBits[2 * BytesNumber];
+
+unsigned char OVF_counter = 0, duty, timer_0 = 0, timer_1 = 0;
+unsigned long t0, t1, f;
+volatile unsigned int falling, rising_0 = 0, rising_1, Si = 0, counter, j = 0;
+volatile boolean checkIn = true, Syn = false, flagBytes = false;
+
+ISR(TIMER1_OVF_vect)
+{
+  OVF_counter++;
+}
+
+ISR(TIMER1_CAPT_vect)
+{
+  if (checkIn)
+  {
+    falling = ICR1;
+    timer_0 = OVF_counter;
+    TCCR1B |= (1 << ICES1); // Встановлюємо переривання по наростаючому фронті імпульсу
+    OVF_counter = 0;
+    checkIn = false;
+  }
+  else
+  {
+    timer_1 = OVF_counter;
+    rising_1 = ICR1;
+    t0 = 4 * ((unsigned long)falling - (unsigned long)rising_0 + ((unsigned long)timer_0 * 65536));
+    t1 = 4 * ((unsigned long)rising_1 - (unsigned long)falling + ((unsigned long)timer_1 * 65536));
+    if (Syn && !flagBytes)
+    {
+      if (t0 > FP_MIN && t0 < FP_MAX)
+      {
+        DataBits[counter / 8] &= ~(1 << j);
+      }
+      else
+      {
+        if (t0 > SP_MIN && t0 < SP_MAX)
+        {
+           DataBits[counter / 8] |= (1 << j);
+        }
+        else 
+        {
+         Syn = false;
+        }
+      }
+      j++;
+      if( j >= 8)
+      {
+        j = 0;
+      }
+      counter++;
+      if (counter >= (2 * 8 * BytesNumber))
+      {
+        flagBytes = true;
+        Syn = false;
+      }
+    }
+    else
+    {
+      Syn = false;
+    }
+    if (t0 > FP_MIN && t0 < FP_MAX && !Syn)
+    {
+      Si++;
+      if (t1 > 1000 && Si > 3)
+      {
+        j = 0;
+        counter = 0;
+        Syn = true;
+        Si = 0;
+      }
+    }
+    else
+    {
+      Si = 0;
+    }
+    rising_0 = rising_1;
+    TCCR1B &= ~(1 << ICES1); // Встановлюємо переривання по спадающему фронту імпульсу
+    OVF_counter = 0;
+    checkIn = true;
+  }
+}
+  
 
 void setup()
 {
@@ -46,32 +130,31 @@ void setup()
   SPI.setClockDivider(SPI_CLOCK_DIV128);  
   SPI.setBitOrder(MSBFIRST);
   SPI.setDataMode (SPI_MODE0);
-  StartReceiver();
+  //StartReceiver();
   SPI.end();
+  Serial.println("Receiver is staeted!!!");
+  TCCR1A = 0;
+  TCCR1B |= (1 << ICNC1) | (1 << CS11);
+  TIMSK1 |= (1 << ICIE1) | (1 << TOIE1);
+  TCCR1B &= ~(1 << ICES1);
+  sei();
 }
 
 void loop() 
 {
-  if (digitalRead(DATA) == HIGH)
-  {
-    if (GetSynchronize())
-    {
-      if (GetData())
-      {
-        if (CompareData())
-        {
-          
-        }
-      }
-    }
-  }
+ if(CompareData() && flagBytes)
+ {
+  SerialPrint();
+  flagBytes = false;
+ }
+delay(3000);
 }
 
 boolean CompareData()
 {
   for(uint8_t i = 0; i < BytesNumber; i++)
   {
-    if (DataBits[2 * i] != ~DataBits[2 * i + 1])
+    if (ReverseByte(DataBits[2 * i]) != DataBits[2 * i + 1])
     {
       return false;
     }
@@ -79,114 +162,31 @@ boolean CompareData()
   return true;
 }
 
-boolean GetData()
+byte ReverseByte(byte Byte)
 {
-  uint8_t DataBit = digitalPinToBitMask(DATA);
-  volatile uint8_t *DataPort = portInputRegister(digitalPinToPort(DATA));
-  unsigned long FP_MIN_Clock = microsecondsToClockCycles(FP_MIN)/16;
-  unsigned long FP_MAX_Clock = microsecondsToClockCycles(FP_MAX)/16;
-  unsigned long SP_MIN_Clock = microsecondsToClockCycles(SP_MIN)/16;
-  unsigned long SP_MAX_Clock = microsecondsToClockCycles(SP_MAX)/16;
-  unsigned long F_width = 0;
-  unsigned long S_width = 0;
-  byte j = 0x01;
-  for(uint8_t i = 0, l = 2 * 8 * BytesNumber; i < l; i++)
-  {
-    while ((*DataPort & DataBit) != 0);
-    while ((*DataPort & DataBit) == 0)
-    {
-      if (++F_width == SP_MAX_Clock)
-      {
-        return false;
-      }
-    }
-    while ((*DataPort & DataBit) == DataBit)
-    {
-      if (++S_width == SP_MAX_Clock)
-      {
-        return false;
-      }
-    }
-    if (F_width >= FP_MIN_Clock && F_width <= FP_MAX_Clock)
-    {
-      if (S_width >= SP_MIN_Clock)
-      {
-        DataBits[i / 8] &= ~j;
-      }
-      else
-      {
-        return false;
-      }
-    }
-    else
-    {
-      if (F_width >= SP_MIN_Clock && S_width >= FP_MIN_Clock && S_width <= FP_MAX_Clock)
-      {
-        DataBits[i / 8] |= j; 
-      }
-      else
-      {
-        return false;
-      }
-    }
-  F_width = 0;
-  S_width = 0;  
-  if (!(j << 1))
-  {
-    j = 0x01;
-  }
-  }
-  return true;
+  Byte = (Byte & 0x55) << 1 | (Byte & 0xAA) >> 1;
+  Byte = (Byte & 0x33) << 2 | (Byte & 0xCC) >> 2;
+  Byte = (Byte & 0x0F) << 4 | (Byte & 0xF0) >> 4;
+  return ~Byte;
 }
 
-boolean GetSynchronize()
-{
-  unsigned long duration;
-  for(uint8_t i = 0; i < 12; i++)
-  {
-    duration = pulseIn(DATA, LOW, SP_MAX);
-    if (duration == 0 && digitalRead(DATA) == HIGH)
-    {
-      duration = pulseIn(DATA, LOW, 2000);
-      if (duration == 0)
-      {
-        return true;
-      }
-      else 
-      {
-        break;
-      }
-    }
-    if (duration < FP_MIN || duration > FP_MAX)
-    {
-      break;
-    }
-  }
-  delayMicroseconds(SP_MAX);
-  return false;
-}
+
 
 void SerialPrint()
 {
     Serial.println("Bytes transfer:");
     Serial.print("A = ");
-    //Serial.println(DataABCDEiD[0], HEX);
-    Serial.println(DataBits[0], HEX);
+    Serial.println(DataBits[1], HEX);
     Serial.print("B = ");
-    //Serial.println(DataABCDEiD[1], HEX);
-    Serial.println(DataBits[2], HEX);
+    Serial.println(DataBits[3], HEX);
     Serial.print("C = ");
-    //Serial.println(DataABCDEiD[2], HEX);
-    Serial.println(DataBits[4], HEX);
+    Serial.println(DataBits[5], HEX);
     Serial.print("D = ");
-    //Serial.println(DataABCDEiD[3], HEX);
-    Serial.println(DataBits[6], HEX);
+    Serial.println(DataBits[7], HEX);
     Serial.print("E = ");
-    //Serial.println(DataABCDEiD[4], HEX);
-    Serial.println(DataBits[8], HEX);
+    Serial.println(DataBits[9], HEX);
     Serial.print("ID = ");
-    //Serial.println(DataABCDEiD[5], HEX);
-    Serial.println(DataBits[10], HEX);
+    Serial.println(DataBits[11], HEX);
 }
 
 
