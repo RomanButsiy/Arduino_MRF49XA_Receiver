@@ -37,6 +37,10 @@
 //--------------------------------------------------------------------
 //  Default data:
 //--------------------------------------------------------------------
+#define    R_ID                  0xFF
+#define    D_BYTE                0
+#define    N_BYTE                (~(1 << D_BYTE))
+
 byte DataBits[2 * BytesNumber];
 
 unsigned char OVF_counter = 0, duty, timer_0 = 0, timer_1 = 0;
@@ -130,9 +134,13 @@ void setup()
   SPI.setClockDivider(SPI_CLOCK_DIV128);  
   SPI.setBitOrder(MSBFIRST);
   SPI.setDataMode (SPI_MODE0);
-  //StartReceiver();
+  TestTransmission();
+  StartReceiver();
   SPI.end();
   Serial.println("Receiver is staeted!!!");
+  Serial.end();
+  for(uint8_t i = 0; i < 8; pinMode(i++, OUTPUT));
+  PORTD = 0xFF;
   TCCR1A = 0;
   TCCR1B |= (1 << ICNC1) | (1 << CS11);
   TIMSK1 |= (1 << ICIE1) | (1 << TOIE1);
@@ -140,14 +148,37 @@ void setup()
   sei();
 }
 
+
+
 void loop() 
 {
- if(CompareData() && flagBytes)
+ if(CompareData() && TestData() && flagBytes)
  {
-  SerialPrint();
+  PORTD = ~DataBits[2 * D_BYTE + 1];
+  //SerialPrint();
   flagBytes = false;
  }
-delay(3000);
+ else
+ {
+  flagBytes = false;
+ }
+delay(1000);
+}
+
+boolean TestData()
+{
+  if (DataBits[2 * BytesNumber - 1] != R_ID)
+  {
+    return false;
+  }
+  for(uint8_t i = 0; i < BytesNumber - 1; i++)
+    {
+      if ((DataBits[2 * i + 1] * (N_BYTE & (1 << i))))
+      {
+        return false;
+      }
+    }
+  return true;
 }
 
 boolean CompareData()
