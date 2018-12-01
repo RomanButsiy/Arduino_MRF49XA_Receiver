@@ -1,7 +1,7 @@
 # ARDUINO MRF49XA RECEIVER
-<br>
+
 <a href="https://raw.githubusercontent.com/RomanButsiy/Arduino_MRF49XA_Receiver/master/screens/Receiver.png"><img src="https://raw.githubusercontent.com/RomanButsiy/Arduino_MRF49XA_Receiver/master/screens/Receiver.png" align="left"></a>
-<br>
+
 ##
 ##
  - Розробив Roman
